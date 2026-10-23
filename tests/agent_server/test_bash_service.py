@@ -19,7 +19,12 @@ from fastapi import FastAPI
 from openhands.agent_server import bash_router as bash_router_module
 from openhands.agent_server.bash_service import BashEventService
 from openhands.agent_server.config import Config
-from openhands.agent_server.models import BashCommand, BashEventSortOrder, BashOutput
+from openhands.agent_server.models import (
+    BashCommand,
+    BashEventSortOrder,
+    BashOutput,
+    ExecuteBashRequest,
+)
 from openhands.agent_server.server_details_router import (
     mark_initialization_complete,
     server_details_router,
@@ -235,6 +240,38 @@ async def test_stop_bash_command_idempotent_for_finished_and_unknown(
     for _ in range(2):
         stop = await client.post(f"/api/bash/bash_commands/{cmd_id}/stop")
         assert stop.status_code == 200, stop.text
+
+
+@posix_only
+@pytest.mark.timeout(30)
+async def test_close_records_final_output_for_running_command(tmp_path: Path):
+    """Closing the service (server shutdown) must not leave a command without
+    a final BashOutput: the output printed so far and an exit code are saved,
+    so a restarted server does not report it as still running."""
+    events_dir = tmp_path / "bash_events"
+    ready = tmp_path / "ready"
+    service = BashEventService(bash_events_dir=events_dir)
+    command, _ = await service.start_bash_command(
+        ExecuteBashRequest(command=f"echo started; touch {ready}; sleep 30")
+    )
+    deadline = time.monotonic() + 10
+    while not ready.exists():
+        assert time.monotonic() < deadline, "command never started"
+        await asyncio.sleep(0.05)
+    await asyncio.sleep(0.2)  # let the reader buffer "started"
+
+    await service.close()
+
+    restarted = BashEventService(bash_events_dir=events_dir)
+    page = await restarted.search_bash_events(
+        kind__eq="BashOutput", command_id__eq=command.id
+    )
+    finals = [
+        e for e in page.items if isinstance(e, BashOutput) and e.exit_code is not None
+    ]
+    assert len(finals) == 1
+    assert finals[0].exit_code != 0
+    assert finals[0].stdout == "started\n"
 
 
 async def test_bash_execution_error_log_omits_command(

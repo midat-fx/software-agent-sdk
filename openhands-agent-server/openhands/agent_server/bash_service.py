@@ -383,6 +383,17 @@ class BashEventService:
             except asyncio.CancelledError:
                 self._signal_process_group(process, signal.SIGKILL)
                 await process.wait()
+                # Persist the buffered output and an exit code so the command
+                # does not look like it is still running after a restart.
+                self._save_event_to_file(
+                    BashOutput(
+                        command_id=command.id,
+                        order=output_order,
+                        exit_code=process.returncode,
+                        stdout=stdout_buffer or None,
+                        stderr=stderr_buffer or None,
+                    )
+                )
                 raise
             except TimeoutError:
                 # Send SIGTERM to the whole process group so user-installed
